@@ -93,7 +93,7 @@ AdjustTree: 在插入结点时触发。如果插入后，当前结点的指针�
 
 [PostgreSQL: BTree-implementation](https://www.postgresql.org/docs/current/btree-implementation.html)
 
-> **如何实现一个索引？**
+> 🔍**如何实现一个索引？**
 >
 > 1. 把树的结构写出来，确定它所有接口的 API；
 > 2. 链接到数据库的操作中。
@@ -129,7 +129,7 @@ Typical branching factors will be between a few hundred to a few thousand items 
 
 GiST (Generalized Search Tree) 称为通用搜索树，它为各种类型的索引树 (R-trees, B+-trees, hB-trees, TV-trees, Ch-Trees 等) 都提供了一个统一的接口，允许用户在任意数据类型上进行索引。除此之外，GiST 还具有数据和 *查询的可拓展性*。
 
-> 🔍 **查询的可拓展性**
+> 📕 **查询的可拓展性**
 >
 > 这里指用于可以在 GiST 中自定义查询谓词。以前的搜索树在其处理的数据方面是可扩展的。例如，POSTGRES支持可扩展的B+树和R树。这意味着你可以使用POSTGRES在任何你想要的数据类型上建立一个B+树或R树。但是 B+ 树只支持范围谓词（<, = >），而 R 树只支持 $[n, d]$ 范围查询（包含、包含、相等）。因此，如果你用 POSTGRES B+ 树来索引，比如说，一堆电影，你只能提出类似 "查找所有 < T2 的电影 "的查询。虽然这个查询可能有意义（例如，小于可能意味着价格不那么贵、评分不那么高），但这样的写法并不显然。相反，你想问的是关于电影的特定查询，比如 "找到所有有爆炸场面的电影"，"找到所有有吴京的电影"，或者 "找到所有有摩托车追逐的电影"。这样的查询在 B+ 树、R 树或者除了 GiST 之外的任何其他已知结构中都无法直接支持。
 >
@@ -165,13 +165,118 @@ There are some optional additional methods that can enhance performance. These a
 
 首先，我要了解 R-Tree 是如何进行增删的，我找到了[Delete a Node from BST](https://practice.geeksforgeeks.org/problems/delete-a-node-from-bst/1?utm_source=gfg&utm_medium=article&utm_campaign=bottom_sticky_on_article)， 可以在有空的时候练一练。不过我的重点还是应该在看论文，了解这个模型的架构。因为对于这些增删改查的操作，这篇论文是使用了基于 RL 的方法，不要求先学懂传统的增删的方法。
 
-### 1. Data Structure
+### 0. Extending Python with C++
+
+[Python docs: Extending Python with C++](https://docs.python.org/3/extending/extending.html)
 
 
 
-### 2. Operators
+### 1. Project Structure
+
+RLR-Tree 代码仓库中包含了 6 个 Python 文件和 2 个 C 文件，定义了 R-Tree 的结构及接口、从给定的数据集中构建树的过程、KNN 查询测试方法、范围查询测试方法、RL 选择子树策略的实现、RL 分裂结点策略的实现等过程。下面将每一个文件的作用及依赖关系给出。
+
+**数据结构定义**
+
+1. `RTree.cpp`
+
+   实现了 `RTree.h` 中 RTree 的 insert, split, rangeQuery 等等操作
+
+2. `RTree.py`
+
+   依赖于 [1]，对输入项稍加处理后，直接调用 [1] 中 C++ 对于 RTree 的实现
+
+**核心算法定义**
+
+3. `model_ChooseSubtree.py`
+
+   依赖于 [2]，定义了选择子树的 RL 算法
+
+4. `model_Split.py`
+
+   依赖于 [2]，定义了分裂结点的 RL 算法
+
+5. `combined_model.py`
+
+   依赖于 [2]，定义了交替训练选择子树和分裂结点的算法
+
+**测试过程定义**
+
+6. `RTree_RRstar_test_cpp_KNN.py`
+
+   依赖于 [2]，定义了 R-Tree 和 RRStar 使用 KNN 查询的测试过程
+
+7. `RTree_RRstar_test_cpp.py`
+
+   依赖于 [2]，定义了 R-Tree 和 RRStar 使用范围查询的测试过程
+
+8. `main.cpp`
+
+   依赖于 [1]，定义了读取数据集及测试 baseline 的方法
+
+现在，需要确定的是：
+
+- [ ] 能否把文件 [5] 迁移到 Gist 上，也就是基于 [5] 修改 Gist 中ChooseSubtree 和 Split 的 API。也就是修改 `gistdoInsert`；
+- [ ] 训练与推断过程 (Python 实现的) 如何迁移到 PSQL (C++ 实现的)上面。是在这两个之间建一个接口，还是使用 PSql 的框架重新实现一遍。
+
+### 2. Gist
+
+在确定完当前的工作后，我看了 Gist 的实现代码，找到了其中要修改的文件之一 `gistsplit.c`。它有 700 多行，而且从注释上看，它与硬盘中的 page 紧密相关，我对其中 picksplit, column 的含义都一无所知，完全看不懂它在干什么。因此，还是有必要先看懂 Gist 的理论基础 [Concurrency and Recovery in Generalized Search Trees](https://dsf.berkeley.edu/papers/sigmod97-gist.pdf)，再看代码实现。
+
+> 🔍 **如何高效阅读源码**
+>
+> 高效地阅读源码要求我们**自顶向下**地看这个项目，先了解业务流程，再理清执行流程，最后再深入到代码的每一行中。具体地，在需要阅读一个较大项目 (e.g 由多个文件组成，总代码行数 > 5k) 前，需要先充分了解这个代码的业务逻辑，即**要解决什么问题、有哪些功能、数据怎么交互的**。接下来，把代码跑起来，各种功能都用一下，了解他的执行逻辑（这里可以画出代码执行的流程图）。最后，再开始看源码，这样会容易上手很多。
+
+#### 1) GiST 的实现
+
+GiST 的作者在[Generalized Search Trees for Database Systems](https://pages.cs.wisc.edu/~nil/764/Relat/8_vldb95-gist.pdf)介绍了 GiST 提出的背景、特点、与 B+树 和 R 树的不同、数据结构、实现方法、性能分析，同时作者还回顾了数据库中索引树的基本思想并强调了某些细节。这篇文章非常适合入门，对于后续理解索引树中的并行及 R 树的代码非常重要。
+
+由于传统的索引树如 B+ 树、R 树，只能提供内置的 predicate (如比较数字的大小、范围查询)，并且需要存储数据的 key 满足相应的条件，因此可延展性不够好。于是就有伯克利的学者提出更具延展性的索引树 GiST (Generalized Search Tree)。它支持用户自定义 predicate，只需要实现作者指定的 6 个方法即可。
+
+这六个方法包括与查询相关的 predicate 定义的 4 个方法，以及与树结构调整相关的 2 个方法。对于本项目，应当重点看后者的两个方法:
+
+1. $Penalty(E_1, E_2):$ 给定
+
+
+
+
+
+#### 2) GiST 中并行的实现
+
+
+
+### 3. Data Structure
+
+
+
+### 4. Operators
 
 the Split operation may be propagated upwards
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
