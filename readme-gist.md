@@ -165,6 +165,10 @@ There are some optional additional methods that can enhance performance. These a
 
 首先，我要了解 R-Tree 是如何进行增删的，我找到了[Delete a Node from BST](https://practice.geeksforgeeks.org/problems/delete-a-node-from-bst/1?utm_source=gfg&utm_medium=article&utm_campaign=bottom_sticky_on_article)， 可以在有空的时候练一练。不过我的重点还是应该在看论文，了解这个模型的架构。因为对于这些增删改查的操作，这篇论文是使用了基于 RL 的方法，不要求先学懂传统的增删的方法。
 
+- implement and integrate into DBMSs
+- Generalized Search Tree (GiST), a “template” index structure supporting an extensible set of queries and datatypes.
+- Why generalized search tree can support extensible queries?
+
 ### 0. Extending Python with C++
 
 [Python docs: Extending Python with C++](https://docs.python.org/3/extending/extending.html)
@@ -234,13 +238,90 @@ GiST 的作者在[Generalized Search Trees for Database Systems](https://pages.c
 
 这六个方法包括与查询相关的 predicate 定义的 4 个方法，以及与树结构调整相关的 2 个方法。对于本项目，应当重点看后者的两个方法:
 
-1. $Penalty(E_1, E_2):$ 给定
+1. $Penalty(E_1, E_2):$ 给定两个结点 $E_1, E_2$，返回将 $E_2$ 插入到以 $E_1$ 为根的子树中的 cost。例如在 R-Tree 中，这里的 cost 指的就是插入后 $E_2$ 后，$E_1$ 包围盒的增量；
+2. $PickSplit(P):$ 给定一个包含 $M+1$ 个结点的集合 $P$，返回将 $P$ 划分为两个集合 $(P_1, P_2)$ 的最佳方案。
+
+在作者提出的 `ChooseSubTree(3)` 和 `Split(3)` 算法中，使用到的外部函数有且仅有上述两个方法。
+
+****
+
+🚩 **目标 1: ** 将上述两个函数，以文件 [5] 中的方法实现即可。
+
+看 PostgeSQL 中 [RTree 的代码](https://github.com/postgres/postgres/tree/master/src/backend/access/gist)，它的 ChooseSubTree() 是不是仅仅基于 penalty() 这个外部方法。如果是的话，基于文件 [5] 实现 penalty 即可。
+
+它调用的是 `gistState->penaltyFn[]`，而对 penalty 的定义是在 `RelationData* index` 中的。通过 `gistStateInit()` 函数，将对每个 key 的 penaltyFn 地址赋值到对应的 `penaltyFn[]` 数组中。
+
+现在我下载了 `libgist` 这个仓库，它是 GiST 的 C++ 实现，但是还没有融入到 PostgreSQL 中，虽然这个里面有 example。所以，我还是决定直接对 PostgreSQL 进行 Debug，使用 [VSCode build PSql 的源码](https://blog.sivaram.co.in/2022/09/25/debugging-postgres-on-m1-mac)、[了解 GiST 在 PSql 的用法](https://habr.com/en/company/postgrespro/blog/444742/)、[调试指令](https://blog.sivaram.co.in/2022/09/25/debugging-postgres-on-m1-mac)，来深入地了解 PSql 的运行逻辑，从而对其进行修改。除此之外，这个源码中还有相当多涉及硬盘分页的知识，我还要深入的学习索引与物理内存、外存的对应关系。这个应当与并行的设计高度相关，所以我还要深入理解 [Concurrency and Recovery in Generalized Search Trees](file:///Users/shiqi/Downloads/gist_concurrency.pdf).
+
+🚩 **目标 1.1: 理解 GiST 的并行 调试 PSql 源码 深入理解 PSql 运行逻辑 **
+
+
 
 
 
 
 
 #### 2) GiST 中并行的实现
+
+在一个完整的数据库系统
+
+The rest of this paper is organized as follows: 
+
+- section 2 contains a brief description of the basic GiST structure
+
+  1. **Why do we need GiST?**
+
+     由于传统的索引树如 B+ 树、R 树，只能提供内置的 predicate (如比较数字的大小、范围查询)，并且需要存储数据的 key 满足相应的条件，因此可延展性不够好。而且从 B 树的实现上来看，对于并行访问、事务隔离、异常恢复的支持使得代码变得异常的复杂，并且占据了代码的主要部分。真正实现一个 DBMS 中的索引树相当复杂。
+
+     于是就有伯克利的学者提出更具延展性的索引树 GiST (Generalized Search Tree)。它支持用户自定义 predicate，只需要实现作者指定的 6 个方法即可。而且不需要考虑并行访问、事务隔离等特性。
+
+  2. **Why it can support extensible queries?**
+
+     Because the predicates of GiST is user-difined, more specifically, the `consistent()` method. When searching according to one given predicate,  it just invokes this method to determine whether the given predicate is consistent with the current node. So, there is no restrictions on the queries. It can be range comparison like B-Tree, rectangle box containment like R-Tree, and so on. As long as you implement the `consistent()`, it can then support the corresponding queries.
+
+  3. **What's the structure of GiST?**
+
+     The GiST is a banlanced tree, with extensible data types and queries, and it commonly has a large fanout. The leaf node contains $(key, RdI)$ pairs, with the record identifier pointing to the page the target data lies. While the internal node contains $(predicate, childPointer)$ pairs, where the predicate implies all the data items reachable from the subtree, the `childPoniter` points.
+
+     And this exactly captures the essence of a tree-based index structure: a hierarchy of predicates, in which each predicate holds true for all keys stored under it in the hierarchy.
+
+  4. **How GiST search works?**
+
+     
+
+  5. **How GiST insert works?**
+
+     
+
+  6. **What is the difference between R-Tree and GiST**
+
+     Aside from the extensible queries that only GiST supports, their tree structure is also a little bit different. Overlaps between predicate at the same level is allowed in the GiST, and the union of all these predicates may have "holes". While for the R-Tree, the value range distributed in each level is unique and contagious.
+
+- section 3 extends this structure for concurrent access
+
+  1. **What does concurrent access mean?**
+
+     
+
+  2. **How to make the original structure support concurrent access?**
+
+     
+
+  3. **What's the implementaion difficulties?**
+
+     ，
+
+- section 4 outlines our design of the hybrid locking mechanism. 
+
+- After these preliminaries, the subsequent four sections explain the algorithms for index lookup, key insertion into non-unique and unique indices and key deletion.
+
+- section 9: Logging and recovery
+
+- section 10: discusses a variety of implementation issues
+
+- section 11: discusses some of the implicationsof the structure of an access method for concurrency control techniques and explains why most of the prior work on B-trees cannot be directly applied in the GiST context
+
+- section 12 concludes this paper with a summary.
 
 
 
